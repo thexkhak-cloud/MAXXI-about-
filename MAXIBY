@@ -1,0 +1,353 @@
+--!strict
+
+-- [[ Services Essenciais ]]
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local TeleportService = game:GetService("TeleportService")
+local UserSettings = UserSettings() -- Para configurações de gráficos
+local Lighting = game:GetService("Lighting")
+
+-- [[ Variáveis Globais do Script ]]
+local LocalPlayer = Players.LocalPlayer
+local CurrentCamera = Workspace.CurrentCamera
+local GamePlaceId = game.PlaceId -- ID do jogo atual para TeleportService
+
+-- [[ Estados das Funcionalidades ]]
+local autoStealEggEnabled: boolean = false
+local autoEventEnabled: boolean = false
+local eggNameESPEnabled: boolean = false
+local rareEggHighlightEnabled: boolean = false
+local reduceGraphicsEnabled: boolean = false
+local reduceLagEnabled: boolean = false
+local removeEffectsEnabled: boolean = false
+
+local currentWalkSpeed: number = 16 -- Velocidade de caminhada padrão
+local currentFlySpeed: number = 200 -- Velocidade de voo padrão
+local currentEggStealSpeed: number = 5 -- Intervalo entre ciclos de roubo (segundos)
+
+local selectedEggRarity: string = "Eternal" -- Rarity padrão
+local selectedEggBiome: string = "Cosmic Biome Eggs" -- Biome padrão
+
+local basePosition: Vector3 = Vector3.new(0, 0, 0) -- Posição da base, será atualizada ao iniciar
+
+-- Tabela para armazenar os Highlights de ovos raros
+local eggHighlights: { [Instance]: Highlight } = {}
+-- Tabela para armazenar os BillboardGuis para nomes de ovos
+local eggNameGUIs: { [Instance]: BillboardGui } = {}
+
+-- [[ Listas de Dados do Jogo (Assumidas) ]]
+local EGG_RARITIES = {
+    "Eternal", "Cosmic", "Secret", "Divine", "Mythic", "Legendary", "Epic"
+}
+
+local EGG_BIOMES = {
+    "Forest Biome Eggs", "Lake Biome Eggs", "Desert Biome Eggs", "Jungle Biome Eggs",
+    "Snow Biome Eggs", "Volcano Biome Eggs", "Abyss Ocean Biome Eggs",
+    "Prehistoric Biome Eggs", "Cosmic Biome Eggs", "Cherry Blossom Biome Eggs",
+    "Titan Temple Biome Eggs", "Monster Eggs", "Void Eggs"
+}
+
+local RARE_EGG_RARITIES_FOR_HIGHLIGHT = {
+    ["Eternal"] = true,
+    ["Cosmic"] = true,
+    ["Secret"] = true,
+    ["Divine"] = true
+}
+
+local BEST_PETS_LIST = {
+    "สัตว์เลี้ยงหายากสูงสุด 1: มังกรจักรวาล", -- Cosmic Dragon
+    "สัตว์เลี้ยงหายากสูงสุด 2: ฟีนิกซ์นิรันดร์", -- Eternal Phoenix
+    "สัตว์เลี้ยงหายากสูงสุด 3: หมาป่าแห่งความลับ", -- Secret Wolf
+    "สัตว์เลี้ยงหายากสูงสุด 4: เทพแห่งแสง", -- Divine Light
+    "สัตว์เลี้ยงหายากสูงสุด 5: กริฟฟินในตำนาน" -- Legendary Griffin
+}
+
+-- [[ Funções de Apoio ]]
+
+--- Atualiza a base para a posição atual do jogador.
+local function updateBasePosition()
+    if LocalPlayer and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        basePosition = LocalPlayer.Character.HumanoidRootPart.Position
+    end
+end
+
+--- Define a velocidade de caminhada do jogador local.
+--- @param speed number A nova velocidade de caminhada.
+local function setPlayerWalkSpeed(speed: number)
+    currentWalkSpeed = speed
+    if LocalPlayer and LocalPlayer.Character then
+        local humanoid: Humanoid? = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.WalkSpeed = speed
+        end
+    end
+end
+
+--- Habilita/Desabilita o modo de voo.
+--- @param enable boolean True para habilitar, false para desabilitar.
+local function setFlyMode(enable: boolean)
+    local character = LocalPlayer.Character
+    if not character then return end
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not hrp then return end
+
+    if enable then
+        humanoid.PlatformStand = true -- Impede o personagem de cair
+        humanoid.WalkSpeed = 0 -- Desabilita movimento normal
+        humanoid.JumpPower = 0
+        -- Um BodyVelocity ou VectorForce seria mais robusto, mas CFrame é comum em exploits
+    else
+        humanoid.PlatformStand = false
+        humanoid.WalkSpeed = currentWalkSpeed -- Retorna à velocidade definida pelo usuário
+        humanoid.JumpPower = 50 -- Valor padrão
+    end
+end
+
+--- Voa para uma posição com velocidade e opcionalmente com zig-zag.
+--- @param targetPosition Vector3 A posição de destino.
+--- @param speed number A velocidade de voo.
+--- @param zigZag boolean Se deve usar movimento zig-zag.
+local function flyTo(targetPosition: Vector3, speed: number, zigZag: boolean)
+    local character = LocalPlayer.Character
+    if not character then return end
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    setFlyMode(true) -- Habilita o modo de voo
+
+    local distance = (hrp.Position - targetPosition).magnitude
+    local duration = distance / speed
+    
+    local tweenInfo = TweenInfo.new(
+        duration,
+        Enum.EasingStyle.Linear,
+        Enum.EasingDirection.Out,
+        0,
+        false,
+        0
+    )
+
+    local currentPos = hrp.CFrame.Position
+    local path = {}
+    local numSegments = math.max(1, math.ceil(distance / 50)) -- Pelo menos 1 segmento, 1 segmento a cada 50 studs
+
+    for i = 0, numSegments do
+        local alpha = i / numSegments
+        local interpolatedPos = currentPos:Lerp(targetPosition, alpha)
+
+        if zigZag and i > 0 and i < numSegments then
+            -- Adiciona um pequeno offset aleatório para o zig-zag
+            local randomOffset = Vector3.new(math.random(-5, 5), math.random(-5, 5), math.random(-5, 5))
+            table.insert(path, interpolatedPos + randomOffset)
+        else
+            table.insert(path, interpolatedPos)
+        end
+    end
+
+    for i, segmentPos in ipairs(path) do
+        if not autoStealEggEnabled and not autoEventEnabled then break end -- Permite parar o voo se a função for desativada
+
+        local segmentDuration = duration / #path
+        local goalCFrame = CFrame.new(segmentPos)
+
+        local tween = TweenService:Create(hrp, TweenInfo.new(segmentDuration), {CFrame = goalCFrame})
+        tween:Play()
+        tween.Completed:Wait()
+    end
+    
+    setFlyMode(false) -- Desabilita o modo de voo após o voo
+end
+
+--- Encontra um ovo no Workspace com base na raridade e bioma selecionados.
+--- @return Model? O modelo do ovo encontrado, ou nil.
+--- @return string? A raridade do ovo encontrado.
+local function findEgg(): (Model?, string?)
+    local eggFound: Model? = nil
+    local eggRarity: string? = nil
+    local highestRarityIndex = #EGG_RARITIES + 1 -- Começa com um índice que é "menos raro" que Epic
+
+    -- Itera sobre todos os ovos no Workspace (assumindo que ovos estão em Workspace ou em pastas específicas)
+    for _, child in ipairs(Workspace:GetDescendants()) do
+        if child:IsA("Model") and child.Name:match("Egg") then -- Procurar por modelos que contenham "Egg" no nome
+            local rarityTag = child:GetAttribute("Rarity") or child:FindFirstChild("Rarity") and child.Rarity.Value or child.Name:match("(%a+) Egg") or "Epic" -- Tenta obter raridade de atributo, ValueObject, ou nome
+
+            -- Verifica se a raridade do ovo corresponde à selecionada OU se é mais rara
+            local currentEggRarityIndex = table.find(EGG_RARITIES, rarityTag) or (#EGG_RARITIES + 1)
+            local selectedRarityIndex = table.find(EGG_RARITIES, selectedEggRarity) or (#EGG_RARITIES + 1)
+
+            -- Prioriza ovos mais raros que o selecionado, e depois o selecionado
+            if currentEggRarityIndex <= selectedRarityIndex then
+                -- Verifica se o bioma corresponde (assumindo que o bioma pode estar no nome do ovo ou em uma pasta pai)
+                local biomeMatch = false
+                if string.find(selectedEggBiome, "Biome Eggs") then -- Se é um bioma específico
+                    if child.Parent and child.Parent.Name == selectedEggBiome:gsub(" Eggs", "") then -- Ex: Forest Biome Eggs -> Forest Biome
+                        biomeMatch = true
+                    elseif child.Name:match(selectedEggBiome:gsub(" Eggs", "")) then -- Ex: Forest Egg
+                        biomeMatch = true
+                    end
+                else -- Se for um tipo de ovo geral como Monster Eggs ou Void Eggs
+                    if child.Name:match(selectedEggBiome:gsub(" Eggs", "")) then
+                        biomeMatch = true
+                    end
+                end
+
+                if biomeMatch then
+                    -- Se for um ovo mais raro que o já encontrado ou se for o primeiro ovo válido
+                    if currentEggRarityIndex < highestRarityIndex then
+                        highestRarityIndex = currentEggRarityIndex
+                        eggFound = child
+                        eggRarity = rarityTag
+                    elseif currentEggRarityIndex == highestRarityIndex and eggFound == nil then
+                        eggFound = child
+                        eggRarity = rarityTag
+                    end
+                end
+            end
+        end
+    end
+    return eggFound, eggRarity
+end
+
+--- Coleta um ovo.
+--- @param eggModel Model O modelo do ovo a ser coletado.
+local function collectEgg(eggModel: Model)
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    -- Simula a coleta movendo o HRP para o ovo.
+    -- Em alguns jogos, isso pode acionar um ClickDetector ou um RemoteEvent.
+    -- Aqui, assumimos que tocar é suficiente.
+    local originalCFrame = hrp.CFrame
+    
+    local collectDuration = 1 / currentEggStealSpeed -- Duração baseada na velocidade de roubo
+    collectDuration = math.max(0.1, collectDuration) -- Mínimo de 0.1s para evitar spam excessivo
+
+    local tween = TweenService:Create(hrp, TweenInfo.new(collectDuration, Enum.EasingStyle.Linear), {CFrame = CFrame.new(eggModel.Position)})
+    tween:Play()
+    tween.Completed:Wait()
+
+    -- Espera um pouco para garantir que a coleta seja registrada pelo servidor
+    task.wait(0.1) 
+    
+    -- Retorna à posição original imediatamente após a coleta, para não ficar preso
+    -- hrp.CFrame = originalCFrame -- Não necessário se flyToBase() for chamado logo em seguida
+end
+
+--- Lógica principal do Auto Steal Egg.
+local function autoStealEggLoop()
+    while autoStealEggEnabled do
+        local egg, rarity = findEgg()
+        if egg then
+            print("พบไข่: " .. egg.Name .. " (ระดับความหายาก: " .. rarity .. ")")
+            flyTo(egg.Position, currentFlySpeed, true) -- Voa com zig-zag
+            collectEgg(egg)
+            print("ขโมยไข่แล้ว! กลับฐาน...")
+            flyTo(basePosition, currentFlySpeed, false) -- Retorna à base sem zig-zag
+        else
+            print("ยังไม่เกิดนะคนดี")
+        end
+        task.wait(currentEggStealSpeed) -- Espera antes de procurar o próximo ovo
+    end
+    setFlyMode(false) -- Garante que o modo de voo seja desabilitado ao parar
+end
+
+--- Teleporta para um novo servidor com poucos jogadores.
+--- (Nota: "mínimo de 1 jogador" é difícil de garantir sem API de servidor robusta. Isso apenas tenta um servidor novo/aleatório.)
+local function teleportToNewServer()
+    print("กำลังค้นหาเซิร์ฟเวอร์ใหม่ที่มีผู้เล่นน้อยลง...")
+    TeleportService:Teleport(GamePlaceId) -- Teleporta para um servidor aleatório do mesmo jogo
+end
+
+--- Teleporta o jogador para a dimensão do evento do Abyssal Overlord.
+local function teleportToAbyssalOverlordDimension()
+    -- Este é um placeholder. A lógica real dependeria de como o jogo implementa a dimensão do evento.
+    -- Pode ser um TeleportService:TeleportToPrivateServer(), um portal, ou apenas uma área específica do mapa.
+    print("กำลังเทเลพอร์ตไปยังมิติ Abyssal Overlord...")
+    -- Exemplo: Se houver um portal específico, você pode teletransportar para ele
+    local portal = Workspace:FindFirstChild("AbyssalOverlordPortal")
+    if portal then
+        flyTo(portal.Position, currentFlySpeed, false)
+        -- Ou, se for um RemoteEvent para teleporte:
+        -- game:GetService("ReplicatedStorage").RemoteEvents.TeleportToBossDimension:FireServer()
+    else
+        warn("ไม่พบพอร์ทัล Abyssal Overlord! โปรดระบุตำแหน่งที่ถูกต้อง.")
+        -- Fallback: Apenas voa para uma posição conhecida do boss se não houver portal
+        local bossArenaPosition = Vector3.new(0, 1000, 0) -- Posição de exemplo
+        flyTo(bossArenaPosition, currentFlySpeed, false)
+    end
+end
+
+--- Lógica de ataque ao Abyssal Overlord.
+local function attackAbyssalOverlord()
+    local bossModel = Workspace:FindFirstChild("AbyssalOverlord") -- Assumir nome do modelo do boss
+    if not bossModel then
+        warn("ไม่พบ Abyssal Overlord!")
+        return
+    end
+
+    local bossHumanoid = bossModel:FindFirstChildOfClass("Humanoid")
+    if not bossHumanoid or bossHumanoid.Health <= 0 then
+        warn("Abyssal Overlord ไม่ได้ใช้งานอยู่!")
+        return
+    end
+
+    print("กำลังเข้าโจมตี Abyssal Overlord...")
+    -- Voa para uma posição de ataque segura
+    flyTo(bossModel.Position + Vector3.new(0, 10, 20), currentFlySpeed, false)
+
+    while autoEventEnabled and bossHumanoid.Health > 0 do
+        local bossHand = bossModel:FindFirstChild("Hand") -- Assumir que o boss tem uma "Hand"
+        local handDownThreshold = bossModel.Position.Y - 20 -- Posição Y para considerar a mão "abaixada"
+
+        if bossHand and bossHand.Position.Y < handDownThreshold then
+            -- Mão abaixada, atacar!
+            -- Simular ataque movendo-se para o boss ou chamando um RemoteEvent
+            flyTo(bossModel.Position + Vector3.new(math.random(-5,5), 5, math.random(-5,5)), currentFlySpeed, false)
+            task.wait(0.5) -- Pequeno delay para simular ataque
+        else
+            -- Mão não abaixada, esperar e talvez se esquivar
+            flyTo(bossModel.Position + Vector3.new(math.random(-30,30), 10, math.random(-30,30)), currentFlySpeed, false)
+            task.wait(0.5)
+        end
+        task.wait(0.1) -- Pequeno delay entre verificações
+    end
+    print("Abyssal Overlord ถูกกำจัดแล้ว หรือกิจกรรมถูกปิดใช้งาน")
+    setFlyMode(false)
+end
+
+--- Lógica principal do Auto Event.
+local function autoEventLoop()
+    while autoEventEnabled do
+        local boss = Workspace:FindFirstChild("AbyssalOverlord")
+        if not boss then
+            print("รอ Abyssal Overlord เกิด...")
+            -- Tentar teletransportar para a dimensão do evento se o boss não estiver no mapa principal
+            teleportToAbyssalOverlordDimension()
+            task.wait(10) -- Espera para o teleporte e o boss carregar
+        else
+            attackAbyssalOverlord()
+        end
+        task.wait(5) -- Espera antes de reavaliar
+    end
+    setFlyMode(false)
+end
+
+--- Atualiza a qualidade gráfica e efeitos.
+local function updatePerformanceSettings()
+    -- Reduzir gráficos
+    if reduceGraphicsEnabled then
+        Lighting.Technology = Enum.Technology.Compatibility
+        Lighting.GlobalShadows = false
+        Lighting.Brightness = 0 -- Escurece um pouco para reduzir carga
+        UserSettings.GameSettings.SavedQualityLevel = Enum.QualityLevel.Level1 -- Qualidade mínima
+        UserSettings.GameSettings.SavedGraphicsQuality = Enum.GraphicsQuality.Level1
+    else
+        -- Restaurar (assumindo valores padrão ou anteriores)
+        Lighting.Technology = Enum.Technology.Voxel
+        Lighting.GlobalShadows = true
+        Lighting.Brightness = 2
+        UserSettings.GameSettings.SavedQualityLevel = Enum.QualityLevel.Automatic
+        UserSettings.GameSettings.SavedGraphicsQuality = Enum.
