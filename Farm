@@ -1,0 +1,265 @@
+--[[
+    Mob Killing Simulator Auto-Farm Script
+    Desenvolvido por AsoIA-RBX para Roblox Executors.
+    Este script automatiza a caça a mobs no jogo "Mob Killing Simulator",
+    movendo-se para o mob mais próximo e atacando-o.
+    Possui uma GUI integrada e pausa automaticamente em caso de morte do jogador.
+]]
+
+-- ========================================================================= --
+--                           Variáveis Globais e Serviços                    --
+-- ========================================================================= --
+
+-- Tabela global para armazenar o estado do script, acessível por outras partes.
+_G.AutoFarmEnabled = false  -- Estado atual do Auto-Farm (ligado/desligado)
+_G.AutoFarmTarget = nil     -- O mob atual sendo atacado
+_G.AutoFarmPause = false    -- Indica se o script está pausado (ex: jogador morto ou renascendo)
+
+-- Serviços essenciais do Roblox
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService") -- Usado para Heartbeat para delays precisos
+
+-- Variáveis do jogador local, serão atualizadas no CharacterAdded
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait() -- Espera pelo personagem inicial
+local Humanoid = Character:WaitForChild("Humanoid")
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+
+-- ========================================================================= --
+--                                Configurações                              --
+-- ========================================================================= --
+
+local ATTACK_DELAY = 0.5            -- Tempo de espera entre cada ataque (em segundos). Ajuste conforme o jogo.
+local MOB_DETECTION_RADIUS = 150    -- Raio em studs para detectar mobs ao redor do jogador.
+local MOVEMENT_OFFSET = 5           -- Distância em studs para parar do mob (evita ficar dentro do mob).
+-- Nome do RemoteEvent usado para atacar mobs. ESTE É CRÍTICO!
+-- Você pode precisar inspecionar o tráfego de rede do jogo com seu executor
+-- para encontrar o nome correto do RemoteEvent que o jogo usa para o ataque.
+-- Nomes comuns incluem "AttackEvent", "DamageEvent", "Hit", "SkillEvent", etc.
+local TARGET_REMOTE_NAME = "AttackEvent" -- Exemplo comum, pode precisar de ajuste!
+
+-- Tenta encontrar o RemoteEvent de ataque.
+-- Primeiro, tenta o nome exato em ReplicatedStorage, depois em Workspace.
+local TARGET_REMOTE = ReplicatedStorage:FindFirstChild(TARGET_REMOTE_NAME) or Workspace:FindFirstChild(TARGET_REMOTE_NAME)
+
+-- Se não encontrou pelo nome exato, tenta uma busca mais genérica.
+if not TARGET_REMOTE then
+    warn("[Auto-Farm] RemoteEvent '" .. TARGET_REMOTE_NAME .. "' não encontrado diretamente. Tentando busca genérica.")
+    -- Procura em ReplicatedStorage por RemoteEvents com "attack" no nome
+    for _, child in ipairs(ReplicatedStorage:GetChildren()) do
+        if child:IsA("RemoteEvent") and string.find(string.lower(child.Name), "attack") then
+            TARGET_REMOTE = child
+            warn("[Auto-Farm] Encontrado RemoteEvent potencial em ReplicatedStorage: " .. child.Name)
+            break
+        end
+    end
+    -- Se ainda não encontrou, procura em Workspace
+    if not TARGET_REMOTE then
+        for _, child in ipairs(Workspace:GetChildren()) do
+            if child:IsA("RemoteEvent") and string.find(string.lower(child.Name), "attack") then
+                TARGET_REMOTE = child
+                warn("[Auto-Farm] Encontrado RemoteEvent potencial em Workspace: " .. child.Name)
+                break
+            end
+        end
+    end
+end
+
+-- Aviso se o RemoteEvent ainda não foi encontrado.
+if not TARGET_REMOTE then
+    warn("[Auto-Farm] ATENÇÃO: Não foi possível encontrar um RemoteEvent para atacar mobs.")
+    warn("[Auto-Farm] O Auto-Farm pode não funcionar corretamente. Por favor, verifique 'TARGET_REMOTE_NAME' nas configurações.")
+    warn("[Auto-Farm] Use as ferramentas de rede do seu executor para identificar o RemoteEvent de ataque do jogo.")
+end
+
+-- ========================================================================= --
+--                             Funções Auxiliares                            --
+-- ========================================================================= --
+
+-- Função para atualizar as variáveis do personagem local (Humanoid, HRP)
+-- Usada ao iniciar e quando o personagem renasce.
+local function updateCharacterVariables()
+    Character = LocalPlayer.Character
+    if not Character then
+        _G.AutoFarmPause = true -- Pausa o script se o personagem não existir (ex: morto)
+        warn("[Auto-Farm] Personagem não encontrado, pausando Auto-Farm até o renascimento.")
+        Character = LocalPlayer.CharacterAdded:Wait() -- Espera o personagem renascer
+        _G.AutoFarmPause = false -- Retoma o script
+        warn("[Auto-Farm] Personagem renascido, retomando Auto-Farm.")
+    end
+    Humanoid = Character:WaitForChild("Humanoid")
+    HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+end
+
+-- Conecta a função de atualização ao evento CharacterAdded para lidar com renascimentos
+LocalPlayer.CharacterAdded:Connect(updateCharacterVariables)
+
+-- Verifica se um modelo (mob ou jogador) está vivo e válido
+local function isAlive(model)
+    if not model or not model:IsA("Model") then return false end
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    local hrp = model:FindFirstChild("HumanoidRootPart")
+    -- Um modelo é considerado vivo se tiver Humanoid, HumanoidRootPart, saúde > 0 e não estiver em processo de remoção.
+    return hum and hrp and hum.Health > 0 and hum.Parent == model
+end
+
+-- Encontra o mob mais próximo dentro do raio de detecção
+local function getClosestMob()
+    local closestMob = nil
+    local minDistance = MOB_DETECTION_RADIUS + 1 -- Inicializa com uma distância maior que o raio
+
+    -- Garante que o jogador e seu HRP existam antes de procurar mobs
+    if not HumanoidRootPart or not HumanoidRootPart.Parent or not HumanoidRootPart.Parent.Parent then return nil end
+
+    local myPosition = HumanoidRootPart.Position
+
+    -- Itera por todos os modelos no Workspace
+    for _, child in ipairs(Workspace:GetChildren()) do
+        -- Ignora o próprio jogador e outros jogadores
+        if child:IsA("Model") and child ~= Character and not Players:GetPlayerFromCharacter(child) then
+            if isAlive(child) then -- Verifica se o modelo é um mob vivo
+                local mobHRP = child:FindFirstChild("HumanoidRootPart")
+                if mobHRP then
+                    local distance = (myPosition - mobHRP.Position).Magnitude
+                    if distance < minDistance then -- Se for mais próximo e dentro do raio
+                        minDistance = distance
+                        closestMob = child
+                    end
+                end
+            end
+        end
+    end
+    return closestMob
+end
+
+-- Move o personagem do jogador para uma posição específica
+local function moveTo(position)
+    if Humanoid and HumanoidRootPart and Humanoid.Health > 0 then
+        local success, err = pcall(function()
+            Humanoid:MoveTo(position)
+        end)
+        if not success then
+            warn("[Auto-Farm] MoveTo falhou:", err)
+        end
+    end
+end
+
+-- Ataca o alvo usando o RemoteEvent configurado
+local function attackTarget(target)
+    if not TARGET_REMOTE then return end -- Não há RemoteEvent de ataque configurado
+    if not isAlive(target) then return end -- Não ataca mobs mortos
+
+    local success, err = pcall(function()
+        -- A forma como o RemoteEvent é disparado pode variar de jogo para jogo.
+        -- A opção mais comum para Mob Killing Simulators é passar o HumanoidRootPart do alvo.
+        TARGET_REMOTE:FireServer(target.HumanoidRootPart)
+        -- Outras opções comuns (descomente e teste se a acima não funcionar):
+        -- TARGET_REMOTE:FireServer(target) -- Passa o modelo completo do alvo
+        -- TARGET_REMOTE:FireServer()      -- Não passa argumentos (o servidor detecta o clique)
+        -- TARGET_REMOTE:FireServer(target.Name) -- Passa o nome do alvo
+    end)
+    if not success then
+        warn("[Auto-Farm] FireServer falhou:", err)
+    end
+end
+
+-- ========================================================================= --
+--                             Loop Principal do Auto-Farm                   --
+-- ========================================================================= --
+
+local function autoFarmLoop()
+    while true do
+        task.wait(0.1) -- Pequeno delay para evitar sobrecarga e permitir que o jogo processe outros eventos
+
+        -- Se o Auto-Farm estiver desabilitado ou pausado, aguarda e continua
+        if not _G.AutoFarmEnabled or _G.AutoFarmPause then
+            _G.AutoFarmTarget = nil -- Limpa o alvo atual
+            task.wait(1) -- Espera um pouco mais se estiver inativo
+            continue
+        end
+
+        -- Garante que as variáveis do personagem estão válidas e atualizadas
+        if not Character or not Humanoid or not HumanoidRootPart or Humanoid.Health <= 0 then
+            updateCharacterVariables() -- Tenta redefinir as variáveis do personagem
+            if _G.AutoFarmPause then -- Se ainda estiver pausado após a atualização (ex: esperando renascer)
+                task.wait(1)
+                continue
+            end
+        end
+
+        -- Tenta encontrar o mob mais próximo dentro do raio
+        local targetMob = getClosestMob()
+
+        if targetMob and isAlive(targetMob) then
+            _G.AutoFarmTarget = targetMob -- Define o mob atual como alvo
+            local targetHRP = targetMob:FindFirstChild("HumanoidRootPart")
+
+            if targetHRP then
+                local distance = (HumanoidRootPart.Position - targetHRP.Position).Magnitude
+
+                -- Move o personagem para perto do mob se estiver longe
+                if distance > MOVEMENT_OFFSET then
+                    local direction = (targetHRP.Position - HumanoidRootPart.Position).Unit
+                    local targetPosition = targetHRP.Position - direction * MOVEMENT_OFFSET
+                    moveTo(targetPosition)
+
+                    -- Espera o personagem chegar perto do mob ou um tempo limite
+                    local startTime = RunService.Heartbeat:Wait()
+                    repeat
+                        -- Verifica se o auto-farm foi desabilitado, pausado, ou se o mob morreu
+                        if not _G.AutoFarmEnabled or _G.AutoFarmPause or not isAlive(targetMob) then break end
+                        -- Verifica se o personagem já está perto o suficiente
+                        if (HumanoidRootPart.Position - targetHRP.Position).Magnitude <= MOVEMENT_OFFSET + 2 then break end
+                        task.wait(0.1)
+                    until (RunService.Heartbeat:Wait() - startTime) > 5 -- Timeout de 5 segundos para o movimento
+                end
+
+                -- Se o mob ainda estiver vivo e dentro do alcance de detecção (ou já perto)
+                if isAlive(targetMob) and (HumanoidRootPart.Position - targetHRP.Position).Magnitude <= MOB_DETECTION_RADIUS + MOVEMENT_OFFSET then
+                    attackTarget(targetMob) -- Ataca o mob
+                    task.wait(ATTACK_DELAY) -- Espera o delay entre ataques
+                else
+                    -- Mob morreu, saiu do alcance, ou houve um problema. Limpa o alvo.
+                    _G.AutoFarmTarget = nil
+                end
+            else
+                _G.AutoFarmTarget = nil -- Mob sem HRP válido, limpa o alvo
+            end
+        else
+            _G.AutoFarmTarget = nil -- Nenhum mob encontrado
+            -- Nenhum mob disponível, espera um pouco antes de re-escanear
+            task.wait(2)
+        end
+    end
+end
+
+-- Inicia o loop principal do auto-farm em uma nova thread
+task.spawn(autoFarmLoop)
+
+-- ========================================================================= --
+--                               Criação da GUI                              --
+-- ========================================================================= --
+
+-- Cria o ScreenGui principal
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AutoFarmGUI"
+ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling -- Garante que a GUI aparece sobre outras UIs do jogo
+
+-- Cria o Frame principal da GUI
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "AutoFarmFrame"
+MainFrame.Size = UDim2.new(0, 250, 0, 150) -- Tamanho fixo do frame
+MainFrame.Position = UDim2.new(0.5, -125, 0.5, -75) -- Centraliza o frame na tela
+MainFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40) -- Cor de fundo escura
+MainFrame.BorderColor3 = Color3.fromRGB(25, 25, 25) -- Cor da borda
+MainFrame.BorderSizePixel = 2
+MainFrame.Draggable = true -- Permite que o usuário arraste o frame
+MainFrame.Parent = ScreenGui
+
+-- Adiciona cantos arredondados ao frame
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 8)
+UICorner.Parent
